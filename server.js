@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2/promise");
 const path = require("path");
+const { v4: uuidv4 } = require("uuid");
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -65,6 +66,173 @@ app.get("/user/:id", async (req, res) => {
     res.json(rows[0]);
   } catch (err) {
     res.status(500).json({ message: "DB 오류", error: err.message });
+  }
+});
+
+// 등급 계산 함수
+function calculateGrade(score) {
+  if (score >= 90) return "Ruby";
+  if (score >= 75) return "Diamond";
+  if (score >= 60) return "Platinum";
+  if (score >= 45) return "Gold";
+  if (score >= 30) return "Silver";
+  return "Bronze";
+}
+
+// 답안 제출 API
+app.post("/submit-answer", async (req, res) => {
+  const {
+    문항id,
+    문항유형id,
+    기술도감id,
+    직군id,
+    분야id,
+    회원id,
+    회원기술도감id,
+    정답여부,
+  } = req.body;
+
+  try {
+    const conn = await pool.getConnection();
+
+    // ✅ 1. 회원기술도감이 없으면 생성
+    const [exists] = await conn.query(
+      "SELECT 1 FROM 회원기술도감 WHERE 회원기술도감id = ?",
+      [회원기술도감id]
+    );
+
+    if (exists.length === 0) {
+      await conn.query(
+        `INSERT INTO 회원기술도감 
+         (회원기술도감id, 회원id, 기술도감id, 직군id, 분야id)
+         VALUES (?, ?, ?, ?, ?)`,
+        [회원기술도감id, 회원id, 기술도감id, 직군id, 분야id]
+      );
+    }
+
+    // ✅ 2. 문항 정답 기록 저장
+    const 문항정답기록id = `R${Date.now()}`;
+    await conn.query(
+      `INSERT INTO 문항정답기록 
+        (문항정답기록id, 정답여부, 문항id, 문항유형id, 기술도감id, 직군id, 분야id, 회원id, 회원기술도감id) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        문항정답기록id,
+        정답여부,
+        문항id,
+        문항유형id,
+        기술도감id,
+        직군id,
+        분야id,
+        회원id,
+        회원기술도감id,
+      ]
+    );
+
+    // ✅ 3. 점수 계산
+    const [rows] = await conn.query(
+      `SELECT COUNT(*) AS 총문제수,
+              SUM(CASE WHEN 정답여부 = '1' THEN 1 ELSE 0 END) AS 정답수
+       FROM 문항정답기록
+       WHERE 회원기술도감id = ?`,
+      [회원기술도감id]
+    );
+
+    const 총문제수 = rows[0].총문제수 || 0;
+    const 정답수 = rows[0].정답수 || 0;
+    const 정답률 = 총문제수 > 0 ? Math.round((정답수 / 총문제수) * 100) : 0;
+
+    // ✅ 4. 등급 계산
+    const calculateGrade = (score) => {
+      if (score >= 90) return "Ruby";
+      if (score >= 75) return "Diamond";
+      if (score >= 60) return "Platinum";
+      if (score >= 45) return "Gold";
+      if (score >= 30) return "Silver";
+      return "Bronze";
+    };
+    const 등급 = calculateGrade(정답률);
+
+    // ✅ 5. UPDATE 할 때도 "총 점수"를 백틱으로 감싸기
+    await conn.query(
+      `UPDATE 회원기술도감 SET \`총 점수\` = ?, 등급 = ? 
+       WHERE 회원기술도감id = ?`,
+      [정답률, 등급, 회원기술도감id]
+    );
+
+    conn.release();
+    res.status(200).json({
+      message: "정답 기록 및 점수 저장 완료",
+      총문제수,
+      정답수,
+      정답률,
+      등급,
+    });
+  } catch (err) {
+    console.error("정답 제출 오류:", err.message);
+    res.status(500).json({ message: "서버 오류", error: err.message });
+  }
+});
+// 등급 계산 함수
+function calculateGrade(score) {
+  if (score >= 90) return "Ruby";
+  if (score >= 75) return "Diamond";
+  if (score >= 60) return "Platinum";
+  if (score >= 45) return "Gold";
+  if (score >= 30) return "Silver";
+  return "Bronze";
+}
+
+// 회원 전체 등급 조회 API
+app.get("/user-all-grade/:회원id", async (req, res) => {
+  const { 회원id } = req.params;
+
+  try {
+    const [rows] = await pool.query(
+      `
+      SELECT 
+        g.회원기술도감id,
+        g.기술도감id,
+        g.\`총 점수\` AS 총점수,
+        g.등급,
+        t.언어,
+        t.프레임워크,
+        t.라이브러리,
+        (
+          SELECT COUNT(*) 
+          FROM 문항정답기록 
+          WHERE 회원기술도감id = g.회원기술도감id
+        ) AS 풀이수
+      FROM 회원기술도감 g
+      JOIN 기술도감 t ON g.기술도감id = t.기술도감id
+      WHERE g.회원id = ?
+      `,
+      [회원id]
+    );
+
+    if (!rows.length) {
+      return res.json({ 목록: [], 평균: 0, 최종등급: "Bronze" });
+    }
+
+    const 점수들 = rows
+      .map((r) => r.총점수)
+      .filter((v) => typeof v === "number" && !isNaN(v));
+
+    const 평균 =
+      점수들.length > 0
+        ? Math.round(점수들.reduce((a, b) => a + b, 0) / 점수들.length)
+        : 0;
+
+    const 최종등급 = calculateGrade(평균);
+
+    res.json({
+      목록: rows,
+      평균,
+      최종등급,
+    });
+  } catch (err) {
+    console.error("🔥 유저 전체 등급 조회 오류:", err.message);
+    res.status(500).json({ message: "서버 오류", error: err.message });
   }
 });
 
@@ -189,6 +357,50 @@ app.post("/submit-answer", async (req, res) => {
   }
 });
 
+app.get("/user-grade/:id", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // 사용자의 기술도감 ID들 조회
+    const [userSkillBooks] = await pool.query(
+      "SELECT 회원기술도감id FROM 회원기술도감 WHERE 회원id = ?",
+      [id]
+    );
+
+    if (!userSkillBooks.length) {
+      return res.status(404).json({ message: "기술도감 기록 없음" });
+    }
+
+    // 가장 최근에 업데이트된 기술도감 하나만 기준으로
+    const 회원기술도감id = userSkillBooks[0].회원기술도감id;
+
+    // 문제 수 및 정답 수 조회
+    const [rows] = await pool.query(
+      `SELECT COUNT(*) AS 총문제수, 
+              SUM(CASE WHEN 정답여부 = '1' THEN 1 ELSE 0 END) AS 정답수
+       FROM 문항정답기록
+       WHERE 회원기술도감id = ?`,
+      [회원기술도감id]
+    );
+
+    const 총문제수 = rows[0].총문제수 || 0;
+    const 정답수 = rows[0].정답수 || 0;
+    const 정답률 = 총문제수 > 0 ? Math.round((정답수 / 총문제수) * 100) : 0;
+    const 등급 = calculateGrade(정답률);
+
+    res.json({
+      총점수: 정답률,
+      등급,
+      총문제수,
+      정답수,
+      정답률,
+    });
+  } catch (err) {
+    console.error("등급 조회 오류:", err.message);
+    res.status(500).json({ message: "서버 오류", error: err.message });
+  }
+});
+
 // ✅ 회원가입 API
 app.post("/signup", async (req, res) => {
   const { 회원id, 이름, 비밀번호, 이메일, 역할, 이미지url } = req.body;
@@ -277,7 +489,7 @@ app.get("/main-job-postings", async (req, res) => {
         마감일 AS deadline
       FROM 채용공고
       ORDER BY 채용공고id DESC
-      LIMIT 4
+      LIMIT 8
     `);
     res.json(rows);
   } catch (err) {
