@@ -236,6 +236,26 @@ app.get("/user-all-grade/:회원id", async (req, res) => {
   }
 });
 
+app.get("/check-answer", async (req, res) => {
+  const { 회원id, 문항id } = req.query;
+
+  if (!회원id || !문항id) {
+    return res.status(400).json({ message: "회원id와 문항id는 필수입니다." });
+  }
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT 1 FROM 문항정답기록 WHERE 회원id = ? AND 문항id = ? LIMIT 1`,
+      [회원id, 문항id]
+    );
+
+    res.json({ exists: rows.length > 0 });
+  } catch (err) {
+    console.error("❌ check-answer 오류:", err.message);
+    res.status(500).json({ message: "서버 오류", error: err.message });
+  }
+});
+
 // ✅ 기술도감 목록 API
 app.get("/technologies", async (req, res) => {
   try {
@@ -571,6 +591,90 @@ app.get("/company/:id", async (req, res) => {
   } catch (err) {
     console.error("❌ 기업 정보 조회 오류:", err.message);
     res.status(500).json({ message: "서버 오류", error: err.message });
+  }
+});
+
+app.post("/submit-result", async (req, res) => {
+  const { userId, scores, top3 } = req.body; // 프론트에서 scores(분야별 점수), top3(상위3개) 전달
+
+  if (!userId || !Array.isArray(scores) || !Array.isArray(top3)) {
+    return res.status(400).json({ message: "잘못된 요청입니다." });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    const recommendId = uuidv4();
+
+    // 1. 분야별 점수 기록
+    for (const score of scores) {
+      // score: { 분야id, 분야이름, 합계점수 }
+      const scoreId = `S-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      await connection.query(
+        `INSERT INTO 직군추천점수 (직군추천점수id, 직군추천문항id, 분야id, 직군추천id, 분야당합계점수)
+         VALUES (?, ?, ?, ?, ?)`,
+        [scoreId, "QSET", score.분야id, recommendId, score.합계점수]
+      );
+    }
+
+    // 2. top3 결과 기록 (분야이름 또는 분야id만 저장)
+    const resultKey = uuidv4();
+    await connection.query(
+      `INSERT INTO 직군추천결과 (\`Key\`, \`회원id\`, \`추천분야결과1\`, \`추천분야결과2\`, \`추천분야결과3\`)
+   VALUES (?, ?, ?, ?, ?)`,
+      [
+        resultKey,
+        userId,
+        top3[0] ? JSON.stringify(top3[0]) : null,
+        top3[1] ? JSON.stringify(top3[1]) : null,
+        top3[2] ? JSON.stringify(top3[2]) : null,
+      ]
+    );
+
+    res.status(200).json({ message: "직군 추천 결과 저장 완료" });
+  } catch (err) {
+    console.error("직군 추천 결과 저장 오류:", err.message);
+    res.status(500).json({ message: "서버 오류", error: err.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// ✅ 직군 성향 테스트 결과 불러오기 API
+app.get("/user-recommendation/:userId", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const [rows] = await pool.query(
+      `SELECT 추천분야결과1, 추천분야결과2, 추천분야결과3
+       FROM 직군추천결과
+       WHERE 회원id = ?
+       ORDER BY \`Key\` DESC
+       LIMIT 1`,
+      [userId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "결과 없음" });
+    }
+    const result = rows[0];
+
+    // 파싱 시도 → 실패 시 그대로 문자열 반환
+    const safeParse = (str) => {
+      try {
+        return JSON.parse(str);
+      } catch {
+        return null; // 에러시 null 반환(아예 제외)
+      }
+    };
+
+    res.json({
+      top3: [
+        result.추천분야결과1 ? safeParse(result.추천분야결과1) : null,
+        result.추천분야결과2 ? safeParse(result.추천분야결과2) : null,
+        result.추천분야결과3 ? safeParse(result.추천분야결과3) : null,
+      ].filter(Boolean),
+    });
+  } catch (err) {
+    console.error("결과 불러오기 오류:", err);
+    res.status(500).json({ message: "서버 오류" });
   }
 });
 
