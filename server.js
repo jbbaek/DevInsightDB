@@ -454,7 +454,48 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-// ✅ 로그인 API
+// 기업 회원가입 API (회원가입 후 기업정보, type도 반환)
+app.post("/company-signup", async (req, res) => {
+  const { 기업id, 비밀번호, 기업명, 설립연도, 기업설명 } = req.body;
+
+  // 필수값 검사
+  if (!기업id || !비밀번호 || !기업명) {
+    return res.status(400).json({ message: "필수 값을 모두 입력하세요." });
+  }
+
+  try {
+    // 아이디 중복 체크
+    const [rows] = await pool.query("SELECT * FROM 기업 WHERE 기업id = ?", [
+      기업id,
+    ]);
+    if (rows.length > 0) {
+      return res.status(409).json({ message: "이미 존재하는 기업 ID입니다." });
+    }
+
+    // 필수값만 INSERT (나머지 컬럼은 자동 NULL)
+    await pool.query(
+      "INSERT INTO 기업 (기업id, 비밀번호, 기업명, `설립 연도`, `기업 설명`) VALUES (?, ?, ?, ?, ?)",
+      [기업id, 비밀번호, 기업명, 설립연도, 기업설명]
+    );
+
+    // 가입한 기업 정보 응답
+    res.status(201).json({
+      message: "회원가입 성공",
+      user: {
+        기업id,
+        기업명,
+        설립연도,
+        기업설명,
+      },
+      type: "company",
+    });
+  } catch (err) {
+    console.error("기업 회원가입 DB 오류:", err.message);
+    res.status(500).json({ message: "DB 오류", error: err.message });
+  }
+});
+
+//로그인 API
 app.post("/login", async (req, res) => {
   const { 회원id, 비밀번호 } = req.body;
   console.log("🛠️ 받은 데이터:", req.body);
@@ -466,31 +507,60 @@ app.post("/login", async (req, res) => {
   }
 
   try {
-    const [rows] = await pool.query("SELECT * FROM 회원 WHERE 회원id = ?", [
+    // 1. 일반 회원 테이블 먼저 조회
+    const [userRows] = await pool.query("SELECT * FROM 회원 WHERE 회원id = ?", [
       회원id,
     ]);
 
-    if (rows.length === 0) {
-      return res.status(401).json({ message: "존재하지 않는 회원입니다." });
+    if (userRows.length > 0) {
+      const user = userRows[0];
+      if (user.비밀번호 !== 비밀번호) {
+        return res
+          .status(401)
+          .json({ message: "비밀번호가 일치하지 않습니다." });
+      }
+      // 일반 회원 성공
+      return res.status(200).json({
+        message: "로그인 성공",
+        user: {
+          회원id: user.회원id,
+          이름: user.이름,
+          역할: user.역할,
+          이메일: user.이메일,
+          이미지url: user.이미지url,
+        },
+        type: "user", // 👈 추가!
+      });
     }
 
-    const user = rows[0];
+    // 2. 일반회원에 없으면 기업 테이블 조회
+    const [companyRows] = await pool.query(
+      "SELECT * FROM 기업 WHERE 기업id = ?",
+      [회원id]
+    );
 
-    if (user.비밀번호 !== 비밀번호) {
-      return res.status(401).json({ message: "비밀번호가 일치하지 않습니다." });
+    if (companyRows.length > 0) {
+      const company = companyRows[0];
+      if (company.비밀번호 !== 비밀번호) {
+        return res
+          .status(401)
+          .json({ message: "비밀번호가 일치하지 않습니다." });
+      }
+      // 기업회원 성공
+      return res.status(200).json({
+        message: "로그인 성공",
+        user: {
+          기업id: company.기업id,
+          기업명: company.기업명,
+          설립연도: company["설립 연도"],
+          기업설명: company["기업 설명"],
+        },
+        type: "company", // 👈 추가!
+      });
     }
 
-    // 성공
-    res.status(200).json({
-      message: "로그인 성공",
-      user: {
-        회원id: user.회원id,
-        이름: user.이름,
-        역할: user.역할,
-        이메일: user.이메일,
-        이미지url: user.이미지url,
-      },
-    });
+    // 둘 다 없음
+    return res.status(401).json({ message: "존재하지 않는 회원입니다." });
   } catch (err) {
     console.error("로그인 오류:", err.message);
     res.status(500).json({ message: "서버 오류", error: err.message });
@@ -675,6 +745,146 @@ app.get("/user-recommendation/:userId", async (req, res) => {
   } catch (err) {
     console.error("결과 불러오기 오류:", err);
     res.status(500).json({ message: "서버 오류" });
+  }
+});
+
+// GET /company/:기업id
+app.get("/company/:기업id", async (req, res) => {
+  const { 기업id } = req.params;
+  const [rows] = await pool.query("SELECT * FROM 기업 WHERE 기업id = ?", [
+    기업id,
+  ]);
+  if (rows.length > 0) {
+    res.json(rows[0]);
+  } else {
+    res.status(404).json({ message: "기업 정보 없음" });
+  }
+});
+// POST /company-update
+app.post("/company-update", async (req, res) => {
+  const data = req.body;
+  const 기업id = data.기업id;
+  if (!기업id) {
+    return res.status(400).json({ message: "기업ID 없음" });
+  }
+  // 모든 컬럼 업데이트
+  await pool.query(
+    `UPDATE 기업 SET 
+      기업명=?, 비밀번호=?, 로고url=?, \`설립 연도\`=?, \`기업 연차\`=?, \`기업 설명\`=?, 표준산업분류=?, 연혁=?, \`NTS 분류\`=?, 매출액=?, 평균연봉=?, 기업유형=?, 대표자명=?, 홈페이지=?, \`고용보험 사업장 수\`=?, \`고용보험가입 사원 수\`=?, 통신판매관리번호=?, \`국민연금 가입 사원 수\`=?, 퇴사년=?, 입사년=?, 법인시장구분=?, 상장종목코드=?, 총인원=?, 주소=?
+      WHERE 기업id=?`,
+    [
+      data.기업명,
+      data.비밀번호,
+      data.로고url,
+      data["설립 연도"],
+      data["기업 연차"],
+      data["기업 설명"],
+      data.표준산업분류,
+      data.연혁,
+      data["NTS 분류"],
+      data.매출액,
+      data.평균연봉,
+      data.기업유형,
+      data.대표자명,
+      data.홈페이지,
+      data["고용보험 사업장 수"],
+      data["고용보험가입 사원 수"],
+      data.통신판매관리번호,
+      data["국민연금 가입 사원 수"],
+      data.퇴사년,
+      data.입사년,
+      data.법인시장구분,
+      data.상장종목코드,
+      data.총인원,
+      data.주소,
+      기업id,
+    ]
+  );
+  res.json({ message: "저장 완료" });
+});
+app.post("/check-jobpost-id", async (req, res) => {
+  const { 채용공고id } = req.body;
+  const [rows] = await pool.query(
+    "SELECT 1 FROM 채용공고 WHERE 채용공고id = ?",
+    [채용공고id]
+  );
+  res.json({ exists: rows.length > 0 });
+});
+// 등록 API
+app.post("/add-post", async (req, res) => {
+  const {
+    채용공고id,
+    기업id,
+    제목,
+    기업명,
+    태그,
+    기술스택,
+    마감일,
+    기업소개, // ← 프론트에선 "기업소개"로 보내고 있음
+    경력,
+    학력,
+    주요업무,
+    자격요건,
+    우대사항,
+    복지및혜택,
+    채용절차,
+    위치,
+  } = req.body;
+
+  // 필수값 검사 (필요시)
+  if (!채용공고id || !기업id || !제목) {
+    return res.status(400).json({ message: "필수 값을 입력하세요." });
+  }
+
+  // 이미 존재하는 채용공고id 확인 (권장)
+  const [dup] = await pool.query(
+    "SELECT * FROM 채용공고 WHERE 채용공고id = ?",
+    [채용공고id]
+  );
+  if (dup.length > 0) {
+    return res.status(409).json({ message: "이미 존재하는 채용공고ID입니다." });
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO 채용공고
+        (채용공고id, 기업id, 제목, 기업명, 태그, 기술스택, 마감일, \`기업 소개\`, 경력, 학력, 주요업무, 자격요건, 우대사항, \`복지 및 혜택\`, 채용절차, 위치)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        채용공고id,
+        기업id,
+        제목,
+        기업명,
+        태그,
+        기술스택,
+        마감일,
+        기업소개, // ← 컬럼명 주의!
+        경력,
+        학력,
+        주요업무,
+        자격요건,
+        우대사항,
+        복지및혜택, // ← 컬럼명 주의!
+        채용절차,
+        위치,
+      ]
+    );
+    res.status(201).json({ message: "채용공고 등록 성공" });
+  } catch (err) {
+    console.error("채용공고 등록 오류:", err.message);
+    res.status(500).json({ message: "DB 오류", error: err.message });
+  }
+});
+app.get("/company-postings/:기업id", async (req, res) => {
+  const { 기업id } = req.params;
+  try {
+    const [rows] = await pool.query(
+      "SELECT * FROM 채용공고 WHERE 기업id = ? ORDER BY 마감일 DESC",
+      [기업id]
+    );
+    res.json(rows); // 등록된 채용공고 리스트 반환
+  } catch (err) {
+    res.status(500).json({ message: "DB 오류", error: err.message });
   }
 });
 
