@@ -888,6 +888,24 @@ app.get("/company-postings/:기업id", async (req, res) => {
   }
 });
 
+//전체 자소서 리스트 반환
+app.get("/api/selfintro-list", async (req, res) => {
+  const [rows] = await pool.query(
+    "SELECT 합격자소서ID, 회사명, 합격자소서_제목 FROM 합격자소서"
+  );
+  res.json(rows);
+});
+
+//자소서 상세 정보 반환
+app.get("/api/selfintro/:id", async (req, res) => {
+  const id = req.params.id;
+  const [rows] = await pool.query(
+    "SELECT * FROM 합격자소서 WHERE 합격자소서ID = ?",
+    [id]
+  );
+  res.json(rows[0]);
+});
+
 // ✅ 서버 시작
 app
   .listen(port, () => {
